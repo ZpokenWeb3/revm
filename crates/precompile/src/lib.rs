@@ -22,6 +22,8 @@ pub mod secp256k1;
 #[cfg(feature = "secp256r1")]
 pub mod secp256r1;
 pub mod utilities;
+pub mod btc;
+pub mod btc_utilities;
 
 pub use fatal_precompile::fatal_precompile;
 
