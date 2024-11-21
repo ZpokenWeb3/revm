@@ -1,3 +1,4 @@
+use bitcoin::{Address, Network};
 use byteorder::{BigEndian, WriteBytesExt};
 use tokio::runtime::Runtime;
 
@@ -298,7 +299,59 @@ pub fn btc_tx_by_tx_id_run_rpc(input: &Bytes, client: &BitcoinRpcClient, gas_lim
         }
     }
 
+    storage.insert(input.clone(), output.clone().into());
+
     Ok(PrecompileOutput::new(BTC_TX_BY_TX_ID_BASE, output.into()))
+}
+
+pub fn btc_tx_by_tx_id_run(input: &Bytes, gas_limit: u64, storage: &HashMap<Bytes, Bytes>) -> PrecompileResult {
+    const BTC_TX_BY_TX_ID_BASE: u64 = 25_000;
+    if input.is_empty() || input.len() != 36 {
+        return Ok(PrecompileOutput::new(BTC_TX_BY_TX_ID_BASE, vec![].into()));
+    }
+
+    if BTC_TX_BY_TX_ID_BASE > gas_limit {
+        return Err(Error::OutOfGas.into());
+    }
+
+    if let Some(cached_value) = storage.get(input) {
+        return Ok(PrecompileOutput::new(BTC_TX_BY_TX_ID_BASE, cached_value.clone().into()));
+    }
+
+    Ok(PrecompileOutput::new(BTC_TX_BY_TX_ID_BASE, vec![].into()))
+}
+
+pub fn btc_addr_to_script(input: &Bytes, gas_limit: u64, network: Network, storage: &mut HashMap<Bytes, Bytes>) -> PrecompileResult {
+    const BTC_ADDR_TO_SCRIPT_BASE: u64 = 25_000;
+    if input.is_empty() || input.len() < 24 {
+        return Ok(PrecompileOutput::new(BTC_ADDR_TO_SCRIPT_BASE, vec![].into()));
+    }
+
+    if BTC_ADDR_TO_SCRIPT_BASE > gas_limit {
+        return Err(Error::OutOfGas.into());
+    }
+
+    if let Some(cached_value) = storage.get(input) {
+        return Ok(PrecompileOutput::new(BTC_ADDR_TO_SCRIPT_BASE, cached_value.clone().into()));
+    }
+
+    let address = String::from_utf8(input.as_ref().to_vec()).unwrap();
+
+    let addr = address
+        .parse::<Address<_>>()
+        .unwrap()
+        .require_network(network)
+        .expect(&format!("{}", network.to_string()));
+
+    let script = addr.script_pubkey();
+
+    let mut output = vec![];
+
+    output.extend(script.as_bytes());
+
+    storage.insert(input.clone(), output.clone().into());
+
+    Ok(PrecompileOutput::new(BTC_ADDR_TO_SCRIPT_BASE, output.into()))
 }
 
 pub fn btc_tx_confirmations_run(input: &Bytes, gas_limit: u64, storage: &HashMap<Bytes, Bytes>) -> PrecompileResult {
@@ -338,14 +391,15 @@ pub fn btc_header_n_run(input: &Bytes, gas_limit: u64, storage: &HashMap<Bytes, 
 #[cfg(test)]
 mod test {
     use core::fmt;
-    use bitcoin::Script;
+    use bitcoin::{Network, Script};
     use revm_primitives::{Bytes, hex::FromHex};
 
     use crate::btc_utilities::BitcoinRpcClient;
     use crate::HashMap;
-    use crate::btc::{btc_header_n_run, btc_header_n_run_rpc, btc_tx_by_tx_id_run_rpc, btc_tx_confirmations_run, btc_tx_confirmations_run_rpc};
+    use crate::btc::{btc_addr_to_script, btc_header_n_run, btc_header_n_run_rpc, btc_tx_by_tx_id_run_rpc, btc_tx_confirmations_run, btc_tx_confirmations_run_rpc};
 
     const RPC_URL: &str = "https://bitcoin-testnet.public.blastapi.io";
+    const TARGET_GAS: u64 = 30_000_000;
 
     fn to_hex_string(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{:02x}", b)).collect()
@@ -697,13 +751,12 @@ mod test {
         );
         let height = 2873745u32.to_be_bytes();
         let input = Bytes::from(height);
-        let target_gas: u64 = 30_000_000;
         let mut storage: HashMap<Bytes, Bytes> = HashMap::new();
-        let res = btc_header_n_run_rpc(&input, &client, target_gas, &mut storage);
+        let res = btc_header_n_run_rpc(&input, &client, TARGET_GAS, &mut storage);
         let parsed_header = parse_header(res.clone().unwrap().bytes.as_ref());
         let expected_output = Bytes::from_hex("0x002bd99100000000000002b2622295c76df6ae5f6e9c02d64a914cb9736980d01750e1052000000000000000000007a0e5c4e177ab17da3beaea6aba969f08e71f830ee00d3c566d73b1db61d8ec6e707e2013e762ac6e60232a72bcef483f866acae87c186bfd8a66bea8641d00ffffcebb0dee").unwrap();
         assert_eq!(expected_output, res.clone().unwrap().bytes);
-        let cached_res = btc_header_n_run(&input, target_gas, &storage);
+        let cached_res = btc_header_n_run(&input, TARGET_GAS, &storage);
         assert_eq!(res, cached_res);
     }
 
@@ -714,10 +767,9 @@ mod test {
         );
         let tx_id = hex::decode("ae8601bd8ca8a23e7261cb81b4ed4f221c906bf59808d1a77eda57eb6d65605d").unwrap();
         let input = Bytes::from(tx_id);
-        let target_gas: u64 = 30_000_000;
         let mut storage: HashMap<Bytes, Bytes> = HashMap::new();
-        let res = btc_tx_confirmations_run_rpc(&input, &client, target_gas, &mut storage);
-        let cached_res = btc_tx_confirmations_run(&input, target_gas, &storage);
+        let res = btc_tx_confirmations_run_rpc(&input, &client, TARGET_GAS, &mut storage);
+        let cached_res = btc_tx_confirmations_run(&input, TARGET_GAS, &storage);
         assert_eq!(res, cached_res);
     }
 
@@ -733,10 +785,20 @@ mod test {
         let bit_flag4 = set_flag4(2, 2);
         input.extend(vec![bit_flag1, bit_flag2, bit_flag3, bit_flag4]);
         let input_encoded = Bytes::from(input);
-        let target_gas: u64 = 30_000_000;
         let mut storage: HashMap<Bytes, Bytes> = HashMap::new();
-        let res = btc_tx_by_tx_id_run_rpc(&input_encoded, &client, target_gas, &mut storage);
+        let res = btc_tx_by_tx_id_run_rpc(&input_encoded, &client, TARGET_GAS, &mut storage);
         let expected_output = Bytes::from_hex("0x0000000000000007a70b3a5b094de30175a5a803e10c29ebf0133ad271293adf00000002000000a5000000810000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffff000200000000000000020016001423cf56400dd825d0d998a9c313d6bc6a848014e6000000000000000000266a24aa21a9edd862616e2b962d2e772c910b8103d2b0fcfa73182b2ca8fc65b2dd559bc8e7bf").unwrap();
+        assert_eq!(res.unwrap().bytes, expected_output);
+    }
+
+    // Test from https://github.com/btcsuite/btcd/blob/e9d95eed43d2c7e8afb2c3b7d1165dffe713e132/txscript/example_test.go#L23
+    #[test]
+    fn test_addr_to_script() {
+        let input_str = "12gpXQVcCL2qhTNQgyLVdCFG2Qs2px98nV";
+        let input_encoded = Bytes::from(input_str.as_bytes());
+        let mut storage: HashMap<Bytes, Bytes> = HashMap::new();
+        let res = btc_addr_to_script(&input_encoded, TARGET_GAS, Network::Bitcoin, &mut storage);
+        let expected_output = Bytes::from_hex("0x76a914128004ff2fcaf13b2b91eb654b1dc2b674f7ec6188ac").unwrap();
         assert_eq!(res.unwrap().bytes, expected_output);
     }
 }
