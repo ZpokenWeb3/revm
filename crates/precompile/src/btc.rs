@@ -6,6 +6,80 @@ use revm_primitives::{PrecompileOutput, PrecompileResult};
 
 use crate::{Bytes, Error, HashMap};
 use crate::btc_utilities::BitcoinRpcClient;
+use log::{debug, error, warn};
+
+
+///// ?????
+pub fn btc_utxos_addr_list_run_rpc(
+    input: &Bytes,
+    client: &BitcoinRpcClient,
+    gas_limit: u64,
+    storage: &mut HashMap<Bytes, Bytes>,
+) -> PrecompileResult {
+    const BTC_UTXOS_ADDR_LIST_BASE: u64 = 10_000; // Example gas cost
+
+    if input.len() < 28 {
+        debug!("btcUtxosAddrList run called with insufficient input length: {:?}", input);
+        return Ok(PrecompileOutput::new(BTC_UTXOS_ADDR_LIST_BASE, vec![].into()));
+    }
+
+    if BTC_UTXOS_ADDR_LIST_BASE > gas_limit {
+        return Err(Error::OutOfGas.into());
+    }
+
+    let addr_end = input.len() - 4;
+    let addr = match String::from_utf8(input[0..addr_end].to_vec()) {
+        Ok(a) => a,
+        Err(_) => {
+            error!("Invalid UTF-8 in address input");
+            return Ok(PrecompileOutput::new(BTC_UTXOS_ADDR_LIST_BASE, vec![].into()));
+        }
+    };
+
+    let pg = ((input[addr_end] as u32) << 16)
+        | ((input[addr_end + 1] as u32) << 8)
+        | (input[addr_end + 2] as u32);
+    let pg_size = if input[addr_end + 3] == 0 { 10 } else { input[addr_end + 3] as u32 };
+
+    debug!(
+        "btcUtxosAddrList run called with addr: {}, page: {}, pageSize: {}",
+        addr, pg, pg_size
+    );
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let utxos_result = rt.block_on(client.get_utxos(&addr, pg as usize, pg_size as usize));
+
+    if utxos_result.is_err() {
+        warn!("Unable to lookup UTXOs for address: {}", addr);
+        return Ok(PrecompileOutput::new(BTC_UTXOS_ADDR_LIST_BASE, vec![].into()));
+    }
+
+    let utxos = utxos_result.unwrap();
+    let mut resp = Vec::new();
+    resp.push(utxos.len() as u8);
+
+    for utxo in utxos {
+        let txid = hex::decode(&utxo.txid).unwrap();
+        resp.extend_from_slice(&txid.iter().rev().copied().collect::<Vec<u8>>());
+        resp.write_u16::<BigEndian>(utxo.vout as u16).unwrap(); // Output index
+        resp.write_u64::<BigEndian>((utxo.amount * 1e8) as u64).unwrap(); // Value in satoshis
+
+        debug!(
+            "btcUtxosAddrList adding UTXO to response: txid={}, outputIndex={}, value={}",
+            utxo.txid,
+            utxo.vout,
+            utxo.amount
+        );
+    }
+
+    storage.insert(input.clone(), resp.clone().into());
+    debug!("btcUtxosAddrList returning data: {:?}", resp);
+
+    Ok(PrecompileOutput::new(BTC_UTXOS_ADDR_LIST_BASE, resp.into()))
+}
+
+///// ?????
+
 
 pub fn btc_header_n_run_rpc(input: &Bytes, client: &BitcoinRpcClient, gas_limit: u64, storage: &mut HashMap<Bytes, Bytes>) -> PrecompileResult {
     const BTC_HEADER_N_BASE: u64 = 6_000;
@@ -388,6 +462,81 @@ pub fn btc_header_n_run(input: &Bytes, gas_limit: u64, storage: &HashMap<Bytes, 
     Ok(PrecompileOutput::new(BTC_HEADER_N_BASE, vec![].into()))
 }
 
+pub fn btc_bal_addr_run_rpc(
+    input: &Bytes,
+    client: &BitcoinRpcClient,
+    gas_limit: u64,
+    storage: &mut HashMap<Bytes, Bytes>,
+) -> PrecompileResult {
+    const BTC_BAL_ADDR_BASE: u64 = 5_000; // Example gas cost for balance retrieval
+
+    // Check for minimum input length
+    if input.len() < 24 {
+        debug!(
+            "btcBalAddr run called with nil or insufficient input length: {:?}",
+            input
+        );
+        return Ok(PrecompileOutput::new(BTC_BAL_ADDR_BASE, vec![].into()));
+    }
+
+    if BTC_BAL_ADDR_BASE > gas_limit {
+        return Err(Error::OutOfGas.into());
+    }
+
+    // Extract the address
+    let addr = match String::from_utf8(input.to_vec()) {
+        Ok(a) => a,
+        Err(_) => {
+            error!("Invalid UTF-8 in address input");
+            return Ok(PrecompileOutput::new(BTC_BAL_ADDR_BASE, vec![].into()));
+        }
+    };
+
+    debug!("btcBalAddr called with address: {}", addr);
+
+    // Perform the RPC call to get the balance
+    let rt = Runtime::new().unwrap();
+    let balance_result = rt.block_on(client.get_balance_by_address(&addr));
+
+    if let Err(e) = balance_result {
+        error!(
+            "hVM Error: Unable to process balance of address: {}, error: {}",
+            addr, e
+        );
+        return Ok(PrecompileOutput::new(BTC_BAL_ADDR_BASE, vec![].into()));
+    }
+
+    let balance = balance_result.unwrap();
+
+    // Prepare the response as a big-endian u64
+    let mut resp = vec![];
+    resp.write_u64::<BigEndian>(balance).unwrap();
+    debug!("btcBalAddr returning data: {:?}", resp);
+
+    // Cache the result
+    storage.insert(input.clone(), resp.clone().into());
+
+    Ok(PrecompileOutput::new(BTC_BAL_ADDR_BASE, resp.into()))
+}
+
+#[tokio::test]
+async fn test_get_utxos() {
+    let client = BitcoinRpcClient::new("https://bitcoin-testnet.public.blastapi.io".to_string());
+
+    let address = "https://bitcoin-testnet.public.blastapi.io"; 
+    let utxos = client.get_utxos(address, 0, 10).await.unwrap();
+
+    for utxo in &utxos {
+        println!(
+            "UTXO: txid={}, vout={}, amount={}, address={}",
+            utxo.txid, utxo.vout, utxo.amount, utxo.address
+        );
+    }
+
+    assert!(!utxos.is_empty());
+}
+
+
 #[cfg(test)]
 mod test {
     use core::fmt;
@@ -739,10 +888,11 @@ mod test {
             offset += out_script_pubkey_len;
 
             outputs.push(ParsedTxOutput { out_value, script });
-        }
-
+        } 
         (outputs, offset, total_outputs)
     }
+
+
 
     #[test]
     fn test_header_n() {
@@ -772,7 +922,6 @@ mod test {
         let cached_res = btc_tx_confirmations_run(&input, TARGET_GAS, &storage);
         assert_eq!(res, cached_res);
     }
-
     #[test]
     fn test_tx_by_tx_id() {
         let client = BitcoinRpcClient::new(

@@ -1,4 +1,4 @@
-use core::error::Error;
+use std::error::Error;
 use core::str::FromStr;
 use bitcoin::block::{Header, Version};
 use bitcoin::{Amount, Block, BlockHash, CompactTarget, Denomination, OutPoint, ScriptBuf, Sequence, Transaction, Txid, TxIn, TxMerkleNode, TxOut, Witness};
@@ -6,6 +6,19 @@ use bitcoin::absolute::LockTime;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize, Debug, PartialEq, Clone)]
+pub struct Utxo {
+    pub txid: String,
+    pub vout: u32,
+    pub address: String,
+    pub amount: f64, // Value in BTC
+    pub confirmations: u32,
+    pub spendable: bool,
+    pub solvable: bool,
+    pub script_pub_key: ScriptPubKey,
+}
+
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BitcoinRpcResponse<T> {
@@ -172,7 +185,9 @@ pub struct ScriptSig {
     pub hex: String,
 }
 
-#[derive(Deserialize, Debug, PartialEq)]
+
+
+#[derive(Deserialize, Debug, PartialEq, Clone)]
 pub struct ScriptPubKey {
     pub asm: String,
     pub hex: String,
@@ -350,6 +365,32 @@ impl BitcoinRpcClient {
             output,
         }, transaction.blockhash.unwrap()))
     }
+    pub async fn get_utxos(&self, address: &str, page: usize, page_size: usize) -> Result<Vec<Utxo>, Box<dyn Error>> {
+        let all_utxos: Vec<Utxo> = self
+            .rpc_call(
+                "listunspent",
+                vec![0.into(), 9999999.into(), serde_json::to_value(vec![address]).unwrap()],
+            )
+            .await?;
+
+        // Paginate the results
+        let start = page * page_size;
+        let end = std::cmp::min(start + page_size, all_utxos.len());
+        if start >= all_utxos.len() {
+            return Ok(vec![]); // No more UTXOs on this page
+        }
+
+        Ok(all_utxos[start..end].to_vec())
+    }
+
+
+    pub async fn get_balance_by_address(&self, address: &str) -> Result<u64, Box<dyn Error>> {
+        let params = vec![serde_json::json!(address)];
+        let balance = self.rpc_call::<u64>("getbalancebyaddress", params).await?;
+        Ok(balance)
+    }
+    
+
 }
 
 #[cfg(test)]
@@ -359,6 +400,19 @@ mod tests {
     use super::*;
 
     const RPC_URL: &str = "https://bitcoin-testnet.public.blastapi.io";
+
+    #[tokio::test]
+    async fn test_get_balance_by_address() {
+        let client: BitcoinRpcClient = BitcoinRpcClient::new("https://bitcoin-testnet.public.blastapi.io".to_string());
+        let address = "19MWZb6No9C4BP1UAwtTptV4EtwQNe3uud";
+        let balance = client.get_balance_by_address(address).await;
+    
+        match balance {
+            Ok(amount) => println!("Balance: {}", amount),
+            Err(e) => panic!("Error fetching balance: {}", e),
+        }
+    }
+    
 
     #[tokio::test]
     async fn test_get_block_hash() {
@@ -454,5 +508,6 @@ mod tests {
 
         let (raw_transaction, block_hash) = client.get_raw_transaction(tx_id,  None).await.unwrap();
         assert_eq!(expected_transaction, raw_transaction);
-    }
+    }    
+
 }

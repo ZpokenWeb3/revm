@@ -3233,6 +3233,7 @@ dependencies = [
  "hex",
  "k256",
  "kzg-rs",
+ "log",
  "once_cell",
  "p256",
  "rand",
